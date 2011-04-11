@@ -17,8 +17,47 @@ public class MemoryMeter {
         MemoryMeter.inst = inst;
     }
 
+    /**
+     * IGNORE will completely ignore ByteBuffers that don't expose their entire capacity;
+     * IGNORE_OVERHEAD (default) will include only the size that the buffer exposes (as if
+     * by calling bb.remaining()): this will undercount if the buffers are fragmented; INCLUDE
+     * will count each reference to a shared buffer with the entire retained capacity of the
+     * buffer, which will overcount if there is more than one reference to the buffer.
+     */
+    public static class BufferBehavior
+    {
+        private BufferBehavior(){}
+
+        /** @return The size of a shared buffer. */
+        protected int sharedBufferSize(ByteBuffer buffer)
+        {
+            // reference [to array] + int offset
+            return 8 + 4;
+        }
+
+        public static final BufferBehavior IGNORE = new BufferBehavior();
+
+        public static final BufferBehavior IGNORE_OVERHEAD = new BufferBehavior()
+        {
+            protected int sharedBufferSize(ByteBuffer buffer)
+            {
+                // ... + bytes exposed by the buffer
+                return super.sharedBufferSize(buffer) + buffer.remaining();
+            }
+        };
+
+        public static final BufferBehavior INCLUDE = new BufferBehavior()
+        {
+            protected int sharedBufferSize(ByteBuffer buffer)
+            {
+                // ... + bytes retained by the buffer
+                return super.sharedBufferSize(buffer) + buffer.capacity();
+            }
+        };
+    }
+
     private final Callable<Set<Object>> trackerProvider;
-    private final boolean includeFullBufferSize;
+    private final BufferBehavior bufferBehaviour;
 
     public MemoryMeter() {
         this(new Callable<Set<Object>>() {
@@ -28,16 +67,16 @@ public class MemoryMeter {
                 // - calling equals() can actually change object state (e.g. creating entrySet in HashMap)
                 return Collections.newSetFromMap(new IdentityHashMap<Object, Boolean>());
             }
-        }, true);
+        }, BufferBehavior.IGNORE_OVERHEAD);
     }
 
     /**
      * @param trackerProvider returns a Set with which to track seen objects and avoid cycles
-     * @param includeFullBufferSize
+     * @param bufferBehaviour
      */
-    private MemoryMeter(Callable<Set<Object>> trackerProvider, boolean includeFullBufferSize) {
+    private MemoryMeter(Callable<Set<Object>> trackerProvider, BufferBehavior bufferBehaviour) {
         this.trackerProvider = trackerProvider;
-        this.includeFullBufferSize = includeFullBufferSize;
+        this.bufferBehaviour = bufferBehaviour;
     }
 
     /**
@@ -45,16 +84,15 @@ public class MemoryMeter {
      * @return a MemoryMeter with the given provider
      */
     public MemoryMeter withTrackerProvider(Callable<Set<Object>> trackerProvider) {
-        return new MemoryMeter(trackerProvider, includeFullBufferSize);
+        return new MemoryMeter(trackerProvider, bufferBehaviour);
     }
 
     /**
-     * @return a MemoryMeter that only counts the bytes remaining in a ByteBuffer
-     * in measureDeep, rather than the full size of the backing array.
-     * TODO: handle other types of Buffers
+     * @return a MemoryMeter that uses the given BufferBehavior to account for
+     * shared buffers (where bb.remaining() != bb.capacity())
      */
-    public MemoryMeter omitSharedBufferOverhead() {
-        return new MemoryMeter(trackerProvider, false);
+    public MemoryMeter withBufferBehavior(BufferBehavior bufferBehaviour) {
+        return new MemoryMeter(trackerProvider, bufferBehaviour);
     }
 
     /**
@@ -99,14 +137,8 @@ public class MemoryMeter {
 
             if (current instanceof Object[]) {
                 addArrayChildren((Object[]) current, stack, tracker);
-            }
-            else if (current instanceof ByteBuffer
-                     && ((ByteBuffer) current).hasArray()
-                     && !includeFullBufferSize)
-            {
-                ByteBuffer buffer = (ByteBuffer) current;
-                // reference [to array] + int offset + bytes in the buffer
-                total += 8 + 4 + buffer.remaining();
+            } else if (current instanceof ByteBuffer) {
+                total += measureBuffer(current);
             } else {
                 addFieldChildren(current, stack, tracker);
             }
@@ -144,6 +176,16 @@ public class MemoryMeter {
         }
 
         return total;
+    }
+
+    public long measureBuffer(Object current)
+    {
+        ByteBuffer buffer = (ByteBuffer) current;
+        if (buffer.remaining() != buffer.capacity())
+            // buffer is shared
+            return bufferBehaviour.sharedBufferSize(buffer);
+        // unshared: reference [to array] + int offset + bytes in the buffer
+        return 8 + 4 + buffer.remaining();
     }
 
     private void addFieldChildren(Object current, Stack<Object> stack, Set<Object> tracker) {

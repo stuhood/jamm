@@ -49,8 +49,8 @@ public class MemoryMeterTest
         ByteBuffer one = ByteBuffer.allocate(1);
         ByteBuffer emptyOne = (ByteBuffer) one.duplicate().position(1);
 
-        MemoryMeter m1 = new MemoryMeter();
-        MemoryMeter m2 = m1.omitSharedBufferOverhead();
+        MemoryMeter m1 = new MemoryMeter().withBufferBehavior(MemoryMeter.BufferBehavior.IGNORE_OVERHEAD);
+        MemoryMeter m2 = new MemoryMeter().withBufferBehavior(MemoryMeter.BufferBehavior.IGNORE);
 
         int BB_SHALLOW = 56;
         assertEquals(BB_SHALLOW, m1.measure(empty));
